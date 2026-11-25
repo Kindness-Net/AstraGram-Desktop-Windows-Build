@@ -340,7 +340,9 @@ jobs:
           test -f "$packer"
           cd build/AstraGram-v*-win-x64-release
           "$packer" -target win64 -version "$version" \
-            -path AstraGram.exe -path Updater.exe
+            -path AstraGram.exe -path Updater.exe \
+            -path modules/x64/TelegramWidgetHelper.exe \
+            -path modules/x64/d3d/d3dcompiler_47.dll
           mv "tx64upd${version}" ../
           ls -l "../tx64upd${version}"
 
