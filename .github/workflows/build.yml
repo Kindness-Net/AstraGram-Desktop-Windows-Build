@@ -113,12 +113,6 @@ jobs:
             --appupdateversion "$APP_UPDATE_VERSION" \
             --workflow-path .github/workflows/build-release.yml
 
-      - name: Check packer cache guard.
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -c "from pathlib import Path; assert b'ccache:disable' in Path('Telegram/SourceFiles/_other/packer.cpp').read_bytes()[:4096]"
-
       # subst 会被 Python 和 Qt 还原成长路径，复制到物理短目录后再编译。
       - name: Create short build workspace.
         id: workspace
@@ -246,7 +240,7 @@ jobs:
             ${{ env.SHORT_WORKSPACE }}\build\tmp\ThirdParty
           key: ${{ steps.cache-libs.outputs.cache-primary-key }}
 
-      # build.py 读取 AYUGRAM_CCACHE 接入编译器；packer.cpp 自带 ccache:disable，私钥不进缓存
+      # build.py 读取 AYUGRAM_CCACHE 接入编译器。
       - name: Install ccache.
         shell: bash
         env:
@@ -269,17 +263,6 @@ jobs:
           path: ${{ env.CCACHE_DIR }}
           key: ${{ env.CCACHE_KEY_PREFIX }}${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: ${{ env.CCACHE_KEY_PREFIX }}
-
-      # Packer 是 Telegram 的构建依赖，私钥头文件必须在编译前就位
-      - name: Write packer signing key.
-        shell: bash
-        working-directory: ${{ env.SHORT_WORKSPACE }}
-        env:
-          PACKER_PRIVATE_H: ${{ secrets.PACKER_PRIVATE_H }}
-        run: |
-          set -euo pipefail
-          test -n "$PACKER_PRIVATE_H"
-          printf '%s' "$PACKER_PRIVATE_H" > Telegram/SourceFiles/_other/packer_private.h
 
       - name: Build AstraGram Desktop.
         shell: cmd
@@ -330,21 +313,23 @@ jobs:
           echo "File size of ${artifact}: ${size} Bytes."
 
       - name: Pack update.
+        id: update
         shell: bash
         working-directory: ${{ env.SHORT_WORKSPACE }}
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
         run: |
           set -euo pipefail
-          version=$(sed -n 's/^AppUpdateVersion  *//p' Telegram/build/version)
-          test -n "$version"
-          packer=$(pwd)/build/tmp/out/Release/Packer.exe
-          test -f "$packer"
-          cd build/AstraGram-v*-win-x64-release
-          "$packer" -target win64 -version "$version" \
-            -path AstraGram.exe -path Updater.exe \
-            -path modules/x64/TelegramWidgetHelper.exe \
-            -path modules/x64/d3d/d3dcompiler_47.dll
-          mv "tx64upd${version}" ../
-          ls -l "../tx64upd${version}"
+          release=(build/AstraGram-v*-win-x64-release)
+          test "${#release[@]}" -eq 1
+          update=$(python scripts/package_update.py \
+            --packer build/tmp/out/Release/Packer.exe \
+            --platform windows --arch x64 \
+            --input-dir "${release[0]}" --output-dir build \
+            --path AstraGram.exe --path Updater.exe \
+            --path modules/x64/TelegramWidgetHelper.exe \
+            --path modules/x64/d3d/d3dcompiler_47.dll)
+          echo "path=$update" >> "$GITHUB_OUTPUT"
 
       - name: Write artifact provenance.
         shell: bash
@@ -356,10 +341,10 @@ jobs:
           SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
           VERSION: ${{ inputs.version }}
           APP_UPDATE_VERSION: ${{ inputs.appupdateversion }}
+          UPDATE_PACKAGE: ${{ steps.update.outputs.path }}
         run: |
           set -euo pipefail
           archive=$(ls build/AstraGram-v*-win-x64.zip)
-          update="build/tx64upd${APP_UPDATE_VERSION}"
           python .github/scripts/build_provenance.py write-artifact-manifest \
             --platform windows \
             --arch x64 \
@@ -375,7 +360,7 @@ jobs:
             --appupdateversion "$APP_UPDATE_VERSION" \
             --output "build/provenance-windows-x64.json" \
             --file "$archive" \
-            --file "$update"
+            --file "$UPDATE_PACKAGE"
 
       - name: Upload artifact.
         uses: actions/upload-artifact@v7
@@ -383,12 +368,6 @@ jobs:
           name: AstraGram-Windows-x64
           path: |
             ${{ env.SHORT_WORKSPACE }}\build\AstraGram-v*-win-x64.zip
-            ${{ env.SHORT_WORKSPACE }}\build\tx64upd*
+            ${{ env.SHORT_WORKSPACE }}\build\td-update-win-x64-*
             ${{ env.SHORT_WORKSPACE }}\build\provenance-windows-x64.json
           retention-days: 7
-
-      - name: Remove packer signing key.
-        if: always() && steps.workspace.outcome == 'success'
-        shell: bash
-        working-directory: ${{ env.SHORT_WORKSPACE }}
-        run: rm -f Telegram/SourceFiles/_other/packer_private.h
